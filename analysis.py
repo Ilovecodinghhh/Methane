@@ -1,41 +1,46 @@
 #!/usr/bin/env python3
 """
-Methane Emission & Isotope Analysis
-====================================
-1. Read all subcategory emission data, aggregate by group, and plot.
-2. Monte-Carlo weighted monthly isotope time series (δ13C and δD) per group.
-3. Save results to CSV and plots to PNG.
+Methane Emission & Isotope Analysis (v2 — SciencePlots, IQR, polished)
+========================================================================
+1. Read all subcategory emission data, plot per big group (all categories on one figure).
+2. Monte-Carlo weighted monthly isotope (δ13C & δD) per group with IQR (25th–75th).
+3. Plot & save to CSV. Print summary statistics and suggestions.
 """
 
-import os
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import scienceplots
 from pathlib import Path
 
-np.random.seed(42)
+plt.style.use(["science", "no-latex", "grid"])
 
+np.random.seed(42)
 BASE = Path(__file__).resolve().parent
 OUT = BASE / "output"
 OUT.mkdir(exist_ok=True)
 
-N_MC = 5000  # Monte-Carlo iterations
+N_MC = 5000
 
-# ── Isotope ranges (per mil) ──────────────────────────────────────────────
+# ── Colour palettes ──────────────────────────────────────────────────────
+COLORS_MICRO  = ["#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02"]
+COLORS_BB     = ["#e41a1c", "#ff7f00"]
+COLORS_FF     = ["#377eb8", "#4daf4a", "#984ea3", "#a65628"]
+GROUP_COLORS  = {"Microbial": "#1b9e77", "Biomass Burning": "#e41a1c", "Fossil Fuel": "#377eb8"}
+CAT_COLORS = {}
+
+# ── Isotope ranges (‰) ───────────────────────────────────────────────────
 ISO = {
-    # Microbial
-    "landfill":   {"d13C": (-60, -40),  "dD": (-350, -250)},
+    "landfill":   {"d13C": (-60, -40),    "dD": (-350, -250)},
     "livestock":  {"d13C": (-67.8, -54.6), "dD": (-360, -150)},
-    "manure":     {"d13C": (-65, -45),  "dD": (-350, -300)},
-    "rice":       {"d13C": (-70, -55),  "dD": (-390, -320)},
-    "wastewater": {"d13C": (-60, -45),  "dD": (-360, -300)},
+    "manure":     {"d13C": (-65, -45),     "dD": (-350, -300)},
+    "rice":       {"d13C": (-70, -55),     "dD": (-390, -320)},
+    "wastewater": {"d13C": (-60, -45),     "dD": (-360, -300)},
     "wetland":    {"d13C": (-73.6, -18.2), "dD": (-400, -300)},
-    # Biomass Burning
     "wildfire":   {"d13C": (-26.7, -12.6), "dD": (-260, -170)},
     "biofuel":    {"d13C": (-26.7, -12.6), "dD": (-270, -190)},
-    # Fossil Fuel
     "oil":        {"d13C": (-65.0, -29.1), "dD": (-250, -120)},
     "gas":        {"d13C": (-65.0, -29.1), "dD": (-250, -100)},
     "coal":       {"d13C": (-64.1, -30.8), "dD": (-240, -110)},
@@ -48,20 +53,23 @@ GROUPS = {
     "Fossil Fuel":     ["oil", "gas", "coal", "geological"],
 }
 
-# ── Helper: uniform Monte-Carlo samples ───────────────────────────────────
-def mc_uniform(lo, hi, size):
-    return np.random.uniform(lo, hi, size)
+PRETTY = {
+    "landfill": "Landfill", "livestock": "Livestock", "manure": "Manure",
+    "rice": "Rice Paddies", "wastewater": "Wastewater", "wetland": "Wetland",
+    "wildfire": "Wildfire", "biofuel": "Biofuel Burning",
+    "oil": "Oil", "gas": "Natural Gas", "coal": "Coal", "geological": "Geological",
+}
 
 # ── Read helpers ──────────────────────────────────────────────────────────
 def read_livestock():
     df = pd.read_csv(BASE / "Microbial/monthly_livestock_emission.csv")
     df["Date"] = pd.to_datetime(df["Date"])
-    return df.rename(columns={"Date": "time", "CH4_Emission_Tg": "emission"}).set_index("time")["emission"]
+    return df.set_index("Date")["CH4_Emission_Tg"].rename("emission")
 
 def read_rice():
     df = pd.read_csv(BASE / "Microbial/monthly_rice_emission.csv")
     df["Date"] = pd.to_datetime(df["Date"])
-    return df.rename(columns={"Date": "time", "Emissions_Tg_per_month": "emission"}).set_index("time")["emission"]
+    return df.set_index("Date")["Emissions_Tg_per_month"].rename("emission")
 
 def read_landfill():
     df = pd.read_csv(BASE / "Microbial/monthly_landfill_emission.csv", sep=";")
@@ -85,21 +93,11 @@ def read_manure():
 
 def read_wildfire_emission():
     df = pd.read_csv(BASE / "Biomass Burning/Monthly_Wildfire_emission.csv", sep=";")
-    # Decimal year → datetime
     years = df["time"].values
-    dates = pd.to_datetime([f"{int(y)}-{int(round((y % 1) * 12)) + 1:02d}-01" for y in years])
-    s = pd.Series(df["emission(Tg/Year)"].values, index=dates, name="emission")
-    # Values are monthly Tg (12 per year, sum ≈ 30 Tg/yr consistent with literature)
-    return s
-
-def read_wildfire_d13C():
-    df = pd.read_csv(BASE / "Biomass Burning/Monthly_Wildfire_d13C.csv", sep=";")
-    years = df["time"].values
-    dates = pd.to_datetime([f"{int(y)}-{int(round((y % 1) * 12)) + 1:02d}-01" for y in years])
-    return pd.Series(df["Isotope value for the month"].values, index=dates, name="d13C_wildfire")
+    dates = pd.to_datetime([f"{int(y)}-{int(round((y % 1)*12))+1:02d}-01" for y in years])
+    return pd.Series(df["emission(Tg/Year)"].values, index=dates, name="emission")
 
 def read_biofuel():
-    """Annual → monthly (÷12)."""
     df = pd.read_csv(BASE / "Biomass Burning/annually_biofuel_emission.csv", sep=";")
     rows = []
     for _, r in df.iterrows():
@@ -107,21 +105,18 @@ def read_biofuel():
         monthly = r["emission_year_Tg_ch4"] / 12.0
         for m in range(1, 13):
             rows.append({"time": pd.Timestamp(yr, m, 1), "emission": monthly})
-    s = pd.DataFrame(rows).set_index("time")["emission"]
-    return s
+    return pd.DataFrame(rows).set_index("time")["emission"]
 
 def read_fossil_fuel():
-    """Returns dict with coal, gas, oil Series."""
     df = pd.read_csv(BASE / "Fossil Fuel/monthly_coal_gas_oil_emission.csv", sep=";")
     df["time"] = pd.to_datetime(df["time"], format="%d.%m.%Y")
     df = df.set_index("time")
     return {k: df[k].rename("emission") for k in ["coal", "gas", "oil"]}
 
 def read_geological():
-    """Constant 21.1 Tg/yr → monthly."""
-    return 21.1 / 12.0  # Tg/month, constant
+    return 21.1 / 12.0
 
-# ── Load all emissions ────────────────────────────────────────────────────
+# ── Load ──────────────────────────────────────────────────────────────────
 print("Loading data...")
 emissions = {}
 emissions["landfill"]  = read_landfill()
@@ -133,160 +128,225 @@ emissions["wetland"]   = read_wetland()
 emissions["wildfire"]  = read_wildfire_emission()
 emissions["biofuel"]   = read_biofuel()
 ff = read_fossil_fuel()
-emissions["coal"] = ff["coal"]
-emissions["gas"]  = ff["gas"]
-emissions["oil"]  = ff["oil"]
-
-# Geological: build a series spanning union of all dates
+emissions["coal"] = ff["coal"]; emissions["gas"] = ff["gas"]; emissions["oil"] = ff["oil"]
 all_dates = sorted(set().union(*(s.index for s in emissions.values())))
-geo_monthly = read_geological()
-emissions["geological"] = pd.Series(geo_monthly, index=pd.DatetimeIndex(all_dates), name="emission")
+emissions["geological"] = pd.Series(read_geological(), index=pd.DatetimeIndex(all_dates), name="emission")
 
-# Also load the wildfire observed d13C for reference
-wildfire_d13C_obs = read_wildfire_d13C()
-
-# ── Normalise index to month-start ────────────────────────────────────────
+# Normalise to month-start
 for k in emissions:
     s = emissions[k]
     s.index = s.index.to_period("M").to_timestamp()
-    emissions[k] = s.groupby(s.index).mean()  # deduplicate if any
+    emissions[k] = s.groupby(s.index).mean()
+
+# Assign colours
+for i, c in enumerate(GROUPS["Microbial"]):       CAT_COLORS[c] = COLORS_MICRO[i]
+for i, c in enumerate(GROUPS["Biomass Burning"]): CAT_COLORS[c] = COLORS_BB[i]
+for i, c in enumerate(GROUPS["Fossil Fuel"]):     CAT_COLORS[c] = COLORS_FF[i]
 
 # ══════════════════════════════════════════════════════════════════════════
-# TASK 1 — Plot emission for each big group
+# TASK 1 — Emission stacked-area + line plot per group (one figure per group)
 # ══════════════════════════════════════════════════════════════════════════
-print("Task 1: Plotting group emissions...")
+print("\nTask 1: Emission plots...")
 
 for gname, cats in GROUPS.items():
-    fig, axes = plt.subplots(len(cats), 1, figsize=(12, 3 * len(cats)),
-                             sharex=False, squeeze=False)
-    fig.suptitle(f"{gname} — Monthly CH₄ Emissions (Tg)", fontsize=14, y=1.01)
-    for i, cat in enumerate(cats):
-        ax = axes[i, 0]
-        s = emissions[cat]
-        ax.plot(s.index, s.values, linewidth=0.8)
-        ax.set_ylabel("Tg / month")
-        ax.set_title(cat.capitalize())
-        ax.grid(alpha=0.3)
-    plt.tight_layout()
-    fig.savefig(OUT / f"emission_{gname.replace(' ', '_')}.png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved emission_{gname.replace(' ', '_')}.png")
-
-# Also a combined summary plot (one line per group)
-fig, ax = plt.subplots(figsize=(14, 6))
-for gname, cats in GROUPS.items():
-    # Align to common index, sum
-    frames = [emissions[c] for c in cats]
+    frames = {c: emissions[c] for c in cats}
     merged = pd.concat(frames, axis=1, join="inner")
+
+    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(10, 7), sharex=True,
+                                          gridspec_kw={"height_ratios": [2, 1.2]})
+
+    # Top: stacked area
+    cols = [CAT_COLORS[c] for c in cats]
+    labels = [PRETTY[c] for c in cats]
+    ax_top.stackplot(merged.index, *[merged[c].values for c in cats],
+                     labels=labels, colors=cols, alpha=0.85)
+    ax_top.set_ylabel("CH$_4$ Emission (Tg month$^{-1}$)")
+    ax_top.set_title(f"{gname} Sources — Monthly CH$_4$ Emissions", fontsize=12)
+    ax_top.legend(loc="upper left", fontsize=7, ncol=min(3, len(cats)), framealpha=0.9)
+
+    # Bottom: individual lines
+    for c in cats:
+        ax_bot.plot(merged.index, merged[c].values, label=PRETTY[c],
+                    color=CAT_COLORS[c], linewidth=1)
+    ax_bot.set_ylabel("Tg month$^{-1}$")
+    ax_bot.set_xlabel("Year")
+    ax_bot.legend(loc="upper left", fontsize=7, ncol=min(3, len(cats)), framealpha=0.9)
+
+    plt.tight_layout()
+    fig.savefig(OUT / f"emission_{gname.replace(' ','_')}.png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  ✓ emission_{gname.replace(' ','_')}.png")
+
+# Combined overview
+fig, ax = plt.subplots(figsize=(10, 5))
+for gname, cats in GROUPS.items():
+    merged = pd.concat([emissions[c] for c in cats], axis=1, join="inner")
     total = merged.sum(axis=1)
-    ax.plot(total.index, total.values, label=gname, linewidth=1)
-ax.set_ylabel("Total CH₄ Emission (Tg / month)")
-ax.set_title("Monthly CH₄ Emissions by Source Group")
-ax.legend()
-ax.grid(alpha=0.3)
-fig.savefig(OUT / "emission_all_groups.png", dpi=150, bbox_inches="tight")
+    ax.plot(total.index, total.values, label=gname, color=GROUP_COLORS[gname], linewidth=1.2)
+ax.set_ylabel("Total CH$_4$ Emission (Tg month$^{-1}$)")
+ax.set_xlabel("Year")
+ax.set_title("Monthly CH$_4$ Emissions by Source Group", fontsize=12)
+ax.legend(framealpha=0.9)
+plt.tight_layout()
+fig.savefig(OUT / "emission_all_groups.png", dpi=200, bbox_inches="tight")
 plt.close(fig)
-print("  Saved emission_all_groups.png")
+print("  ✓ emission_all_groups.png")
 
 # ══════════════════════════════════════════════════════════════════════════
-# TASK 2 — Monte-Carlo weighted isotope time series per group
+# TASK 2 — Monte-Carlo isotope (IQR: 25th–75th)
 # ══════════════════════════════════════════════════════════════════════════
-print("Task 2: Monte-Carlo isotope calculation...")
+print("\nTask 2: Monte-Carlo isotope calculation (IQR)...")
 
-def compute_group_isotope_mc(group_name, cat_list, iso_key):
-    """
-    For each month in the overlapping period, compute
-        δ_group = Σ(emission_i * δ_i) / Σ(emission_i)
-    where δ_i ~ Uniform(lo, hi) for each subcategory i.
-    Returns DataFrame with columns: median, p5, p95, mean, std.
-    """
-    # Find common date range
+def compute_group_isotope_mc(cat_list, iso_key):
     frames = {c: emissions[c] for c in cat_list}
-    merged_em = pd.concat(frames, axis=1, join="inner")  # columns = cat names
+    merged_em = pd.concat(frames, axis=1, join="inner")
     dates = merged_em.index
-    n_months = len(dates)
+    n = len(dates)
 
-    # MC array: (n_months, N_MC)
-    weighted_sum = np.zeros((n_months, N_MC))
-    total_em = np.zeros((n_months, N_MC))
+    weighted_sum = np.zeros((n, N_MC))
+    total_em = np.zeros((n, N_MC))
 
     for cat in cat_list:
-        em = merged_em[cat].values  # (n_months,)
+        em = merged_em[cat].values
         lo, hi = ISO[cat][iso_key]
-
-        # For wildfire d13C we have observed monthly values — use them as the mean
-        # with a small spread, but the task says use the range, so stick with uniform.
-        iso_samples = mc_uniform(lo, hi, (n_months, N_MC))  # (n_months, N_MC)
-
-        # emission is deterministic (from data); isotope is uncertain
+        iso_samples = np.random.uniform(lo, hi, (n, N_MC))
         weighted_sum += em[:, None] * iso_samples
         total_em += em[:, None]
 
-    delta_group = weighted_sum / total_em  # (n_months, N_MC)
+    delta = weighted_sum / total_em
 
-    result = pd.DataFrame({
+    return pd.DataFrame({
         "date": dates,
-        f"{iso_key}_median": np.median(delta_group, axis=1),
-        f"{iso_key}_mean":   np.mean(delta_group, axis=1),
-        f"{iso_key}_p5":     np.percentile(delta_group, 5, axis=1),
-        f"{iso_key}_p95":    np.percentile(delta_group, 95, axis=1),
-        f"{iso_key}_std":    np.std(delta_group, axis=1),
-    })
-    return result.set_index("date")
+        f"{iso_key}_median": np.median(delta, axis=1),
+        f"{iso_key}_mean":   np.mean(delta, axis=1),
+        f"{iso_key}_q25":    np.percentile(delta, 25, axis=1),
+        f"{iso_key}_q75":    np.percentile(delta, 75, axis=1),
+        f"{iso_key}_std":    np.std(delta, axis=1),
+    }).set_index("date")
 
 results = {}
 for gname, cats in GROUPS.items():
     print(f"  Processing {gname}...")
-    d13C = compute_group_isotope_mc(gname, cats, "d13C")
-    dD   = compute_group_isotope_mc(gname, cats, "dD")
-    combined = pd.concat([d13C, dD], axis=1)
-    results[gname] = combined
+    d13C = compute_group_isotope_mc(cats, "d13C")
+    dD   = compute_group_isotope_mc(cats, "dD")
+    results[gname] = pd.concat([d13C, dD], axis=1)
 
 # ══════════════════════════════════════════════════════════════════════════
-# TASK 3 — Plot & save CSV
+# TASK 3 — Plot isotopes & save CSV
 # ══════════════════════════════════════════════════════════════════════════
-print("Task 3: Plotting isotopes & saving CSV...")
+print("\nTask 3: Plotting isotopes & saving CSV...")
 
 for gname, df in results.items():
-    # Save CSV
-    csv_path = OUT / f"isotope_{gname.replace(' ', '_')}.csv"
+    csv_path = OUT / f"isotope_{gname.replace(' ','_')}.csv"
     df.to_csv(csv_path)
-    print(f"  Saved {csv_path.name}")
+    print(f"  ✓ {csv_path.name}")
 
-    # Plot
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-    fig.suptitle(f"{gname} — Emission-Weighted Isotope Signatures (Monte Carlo, n={N_MC})",
-                 fontsize=13)
+    color_c = GROUP_COLORS[gname]
+    # Slightly different shade for dD
+    color_d = {"Microbial": "#d95f02", "Biomass Burning": "#ff7f00", "Fossil Fuel": "#984ea3"}[gname]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    fig.suptitle(f"{gname} — Emission-Weighted Isotope Signatures\n"
+                 f"(Monte Carlo, n = {N_MC:,}; shading = IQR 25th–75th)",
+                 fontsize=11)
 
     # δ13C
-    ax1.plot(df.index, df["d13C_median"], color="C0", linewidth=1, label="Median")
-    ax1.fill_between(df.index, df["d13C_p5"], df["d13C_p95"],
-                     alpha=0.25, color="C0", label="5th–95th percentile")
-    ax1.set_ylabel("δ¹³C (‰)")
-    ax1.legend(loc="upper right")
-    ax1.grid(alpha=0.3)
+    ax1.plot(df.index, df["d13C_median"], color=color_c, linewidth=1, label="Median")
+    ax1.fill_between(df.index, df["d13C_q25"], df["d13C_q75"],
+                     alpha=0.3, color=color_c, label="IQR (25th–75th)")
+    ax1.set_ylabel("$\\delta^{13}$C (‰ VPDB)")
+    ax1.legend(loc="best", fontsize=8, framealpha=0.9)
 
     # δD
-    ax2.plot(df.index, df["dD_median"], color="C1", linewidth=1, label="Median")
-    ax2.fill_between(df.index, df["dD_p5"], df["dD_p95"],
-                     alpha=0.25, color="C1", label="5th–95th percentile")
-    ax2.set_ylabel("δD (‰)")
-    ax2.set_xlabel("Date")
-    ax2.legend(loc="upper right")
-    ax2.grid(alpha=0.3)
+    ax2.plot(df.index, df["dD_median"], color=color_d, linewidth=1, label="Median")
+    ax2.fill_between(df.index, df["dD_q25"], df["dD_q75"],
+                     alpha=0.3, color=color_d, label="IQR (25th–75th)")
+    ax2.set_ylabel("$\\delta$D (‰ VSMOW)")
+    ax2.set_xlabel("Year")
+    ax2.legend(loc="best", fontsize=8, framealpha=0.9)
 
     plt.tight_layout()
-    fig.savefig(OUT / f"isotope_{gname.replace(' ', '_')}.png", dpi=150, bbox_inches="tight")
+    fig.savefig(OUT / f"isotope_{gname.replace(' ','_')}.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"  Saved isotope_{gname.replace(' ', '_')}.png")
+    print(f"  ✓ isotope_{gname.replace(' ','_')}.png")
 
-# ── Also save group emission totals to CSV ────────────────────────────────
+# Save emission CSVs
 for gname, cats in GROUPS.items():
-    frames = {c: emissions[c] for c in cats}
-    merged = pd.concat(frames, axis=1, join="inner")
+    merged = pd.concat({c: emissions[c] for c in cats}, axis=1, join="inner")
     merged["total"] = merged.sum(axis=1)
-    csv_path = OUT / f"emission_{gname.replace(' ', '_')}.csv"
-    merged.to_csv(csv_path)
-    print(f"  Saved {csv_path.name}")
+    merged.to_csv(OUT / f"emission_{gname.replace(' ','_')}.csv")
+    print(f"  ✓ emission_{gname.replace(' ','_')}.csv")
 
-print("\n✅ All done! Results in:", OUT)
+# ══════════════════════════════════════════════════════════════════════════
+# Summary statistics & suggestions
+# ══════════════════════════════════════════════════════════════════════════
+print("\n" + "="*72)
+print("SUMMARY STATISTICS")
+print("="*72)
+
+for gname, cats in GROUPS.items():
+    merged = pd.concat({c: emissions[c] for c in cats}, axis=1, join="inner")
+    total = merged.sum(axis=1)
+    annual = total.resample("YE").sum()
+    iso_df = results[gname]
+
+    print(f"\n── {gname} ──")
+    print(f"  Emission (annual Tg):  mean={annual.mean():.1f}  "
+          f"min={annual.min():.1f}  max={annual.max():.1f}")
+    for cat in cats:
+        s = merged[cat]
+        ann = s.resample("YE").sum()
+        frac = (ann / annual * 100)
+        print(f"    {PRETTY[cat]:18s}  mean={ann.mean():7.1f} Tg/yr  ({frac.mean():5.1f}%)")
+
+    print(f"  δ13C median (‰):  overall={iso_df['d13C_median'].mean():.1f}  "
+          f"IQR width={( iso_df['d13C_q75'] - iso_df['d13C_q25'] ).mean():.1f}")
+    print(f"  δD   median (‰):  overall={iso_df['dD_median'].mean():.1f}  "
+          f"IQR width={( iso_df['dD_q75'] - iso_df['dD_q25'] ).mean():.1f}")
+
+print("\n" + "="*72)
+print("SUGGESTIONS FOR INTERPRETATION")
+print("="*72)
+print("""
+1. ISOTOPE SEPARATION BETWEEN GROUPS
+   - Biomass Burning has the most enriched δ13C (≈ −20‰), clearly distinct from
+     Microbial (≈ −53‰) and Fossil Fuel (≈ −47‰). δ13C alone can separate
+     biomass burning from the other two, but NOT microbial from fossil fuel.
+   - δD adds discrimination: Microbial sources are the most D-depleted (≈ −315‰)
+     while Fossil Fuel (≈ −180‰) and Biomass Burning (≈ −220‰) are heavier.
+   → Use dual-isotope (δ13C vs δD) space to separate all three groups.
+
+2. LARGE UNCERTAINTY IN MICROBIAL SIGNATURES
+   - Wetland δ13C spans −73.6 to −18.2‰ — this alone dominates the IQR.
+   - Wetland is also the largest microbial emitter (~160 Tg/yr).
+   → Narrowing wetland isotope constraints would most improve group-level estimates.
+   → Consider region-specific or biome-specific wetland isotope values.
+
+3. FOSSIL FUEL SUBCATEGORIES OVERLAP
+   - Oil, gas, coal, and geological all share very similar δ13C and δD ranges.
+   - Their isotopic separation is poor; source attribution within fossil fuel
+     requires additional tracers (e.g., ethane/methane ratio, 14C, clumped isotopes).
+
+4. TEMPORAL TRENDS
+   - Microbial emissions show strong seasonality (rice + wetland peak in boreal summer).
+   - Fossil Fuel emissions show a steady upward trend (gas growth).
+   - Biomass Burning is relatively stable.
+   → Seasonal isotope variations are driven mainly by the microbial group;
+     this can be leveraged for top-down inversion studies.
+
+5. MONTE CARLO APPROACH
+   - Uniform distributions are conservative (maximum entropy for bounded ranges).
+   - If literature provides means ± σ, switching to truncated-normal would
+     tighten the IQR and better reflect the actual knowledge state.
+   - Consider correlating isotope values with emission magnitude if data permits.
+
+6. PRACTICAL RECOMMENDATIONS
+   - For atmospheric modelling: report emission-weighted isotope signatures
+     with IQR as the uncertainty band (this analysis).
+   - For source attribution: combine δ13C and δD in a Keeling-plot or
+     Bayesian mixing model framework.
+   - Priority measurement targets: wetland-specific δ13C, livestock δD
+     (current range −360 to −150‰ is very broad).
+""")
+
+print("✅ All done! Results in:", OUT)
