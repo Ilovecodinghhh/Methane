@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """
-Methane Emission & Isotope Analysis (v2 — SciencePlots, IQR, polished)
-========================================================================
-1. Read all subcategory emission data, plot per big group (all categories on one figure).
-2. Monte-Carlo weighted monthly isotope (δ13C & δD) per group with IQR (25th–75th).
-3. Plot & save to CSV. Print summary statistics and suggestions.
+Methane Emission & Isotope Analysis (v3 — Literature-updated, truncated-normal MC)
+====================================================================================
+Updated isotope signatures from:
+  [1] Sherwood et al. (2017)  – Global database (10,706 samples)
+  [2] Douglas et al. (2021)   – Flux-weighted δ²H, Monte Carlo approach
+  [3] Etiope et al. (2019)    – Geological seepage gridded δ¹³C
+  [4] Menoud et al. (2022)    – European EMID database
+  [5] Lan et al. (2021)       – Gridded δ¹³C maps for inversions
+  [6] Singh et al. (2026, pre) – South Asian + global dual-isotope compilation
+  [7] Thanwerdas et al. (2025) – Uncertainty propagation framework
+
+Distribution: Truncated Normal (μ ± σ, truncated at ±3σ)
 """
 
 import numpy as np
@@ -13,6 +20,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import scienceplots
+from scipy.stats import truncnorm
 from pathlib import Path
 
 plt.style.use(["science", "no-latex", "grid"])
@@ -22,29 +30,37 @@ BASE = Path(__file__).resolve().parent
 OUT = BASE / "output"
 OUT.mkdir(exist_ok=True)
 
-N_MC = 5000
+N_MC = 10000  # increased for better convergence
 
-# ── Colour palettes ──────────────────────────────────────────────────────
-COLORS_MICRO  = ["#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02"]
-COLORS_BB     = ["#e41a1c", "#ff7f00"]
-COLORS_FF     = ["#377eb8", "#4daf4a", "#984ea3", "#a65628"]
-GROUP_COLORS  = {"Microbial": "#1b9e77", "Biomass Burning": "#e41a1c", "Fossil Fuel": "#377eb8"}
-CAT_COLORS = {}
-
-# ── Isotope ranges (‰) ───────────────────────────────────────────────────
+# ── Updated isotope signatures: (mean, sigma) ────────────────────────────
+# See references/ISOTOPE_VALUES.md for full citations and justification.
 ISO = {
-    "landfill":   {"d13C": (-60, -40),    "dD": (-350, -250)},
-    "livestock":  {"d13C": (-67.8, -54.6), "dD": (-360, -150)},
-    "manure":     {"d13C": (-65, -45),     "dD": (-350, -300)},
-    "rice":       {"d13C": (-70, -55),     "dD": (-390, -320)},
-    "wastewater": {"d13C": (-60, -45),     "dD": (-360, -300)},
-    "wetland":    {"d13C": (-73.6, -18.2), "dD": (-400, -300)},
-    "wildfire":   {"d13C": (-26.7, -12.6), "dD": (-260, -170)},
-    "biofuel":    {"d13C": (-26.7, -12.6), "dD": (-270, -190)},
-    "oil":        {"d13C": (-65.0, -29.1), "dD": (-250, -120)},
-    "gas":        {"d13C": (-65.0, -29.1), "dD": (-250, -100)},
-    "coal":       {"d13C": (-64.1, -30.8), "dD": (-240, -110)},
-    "geological": {"d13C": (-68.0, -24.3), "dD": (-300, -100)},
+    # ── Microbial ──
+    # Landfill: [1] Table 5 (waste), [2] Table 1
+    "landfill":   {"d13C": (-56.0, 4.9),  "dD": (-297, 6)},
+    # Livestock (enteric): [6] C3/C4-weighted global; [2] Table 1
+    "livestock":  {"d13C": (-63.8, 2.4),   "dD": (-308, 28)},
+    # Manure: Arndt et al. (2022); [2] Table 1 (combined)
+    "manure":     {"d13C": (-50.0, 5.0),   "dD": (-308, 28)},
+    # Rice: [1] Table 5; [2] Table 1
+    "rice":       {"d13C": (-62.2, 3.9),   "dD": (-323, 20)},
+    # Wastewater: [1]/[4] estimated; [2] inflated σ
+    "wastewater": {"d13C": (-52.0, 6.0),   "dD": (-297, 20)},
+    # Wetland: [2] flux-weighted global mean
+    "wetland":    {"d13C": (-63.9, 3.3),   "dD": (-310, 25)},
+    # ── Biomass Burning ──
+    # Wildfire: [1] Table 5 (all BB); estimated δ²H
+    "wildfire":   {"d13C": (-26.2, 4.8),   "dD": (-211, 30)},
+    # Biofuel: [7] sub-sector variability; estimated δ²H
+    "biofuel":    {"d13C": (-25.0, 5.0),   "dD": (-220, 35)},
+    # ── Fossil Fuel ──
+    # Oil & Gas: [1] Table 5 (conventional); [5] production-weighted
+    "oil":        {"d13C": (-44.0, 10.7),  "dD": (-194, 50)},
+    "gas":        {"d13C": (-44.0, 10.7),  "dD": (-194, 50)},
+    # Coal: [1] Table 5; [4] EMID Silesia; compromise δ²H
+    "coal":       {"d13C": (-49.5, 11.2),  "dD": (-210, 50)},
+    # Geological: [3] emission-weighted; [2] Table 1
+    "geological": {"d13C": (-49.0, 10.0),  "dD": (-189, 44)},
 }
 
 GROUPS = {
@@ -60,7 +76,20 @@ PRETTY = {
     "oil": "Oil", "gas": "Natural Gas", "coal": "Coal", "geological": "Geological",
 }
 
-# ── Read helpers ──────────────────────────────────────────────────────────
+# ── Colour palettes ──────────────────────────────────────────────────────
+COLORS_MICRO  = ["#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02"]
+COLORS_BB     = ["#e41a1c", "#ff7f00"]
+COLORS_FF     = ["#377eb8", "#4daf4a", "#984ea3", "#a65628"]
+GROUP_COLORS  = {"Microbial": "#1b9e77", "Biomass Burning": "#e41a1c", "Fossil Fuel": "#377eb8"}
+CAT_COLORS = {}
+
+# ── Truncated normal sampler ─────────────────────────────────────────────
+def sample_truncnorm(mu, sigma, size):
+    """Draw from N(mu, sigma) truncated at ±3σ."""
+    a, b = -3, 3  # in units of sigma
+    return truncnorm.rvs(a, b, loc=mu, scale=sigma, size=size)
+
+# ── Read helpers (identical to v2) ────────────────────────────────────────
 def read_livestock():
     df = pd.read_csv(BASE / "Microbial/monthly_livestock_emission.csv")
     df["Date"] = pd.to_datetime(df["Date"])
@@ -132,19 +161,17 @@ emissions["coal"] = ff["coal"]; emissions["gas"] = ff["gas"]; emissions["oil"] =
 all_dates = sorted(set().union(*(s.index for s in emissions.values())))
 emissions["geological"] = pd.Series(read_geological(), index=pd.DatetimeIndex(all_dates), name="emission")
 
-# Normalise to month-start
 for k in emissions:
     s = emissions[k]
     s.index = s.index.to_period("M").to_timestamp()
     emissions[k] = s.groupby(s.index).mean()
 
-# Assign colours
 for i, c in enumerate(GROUPS["Microbial"]):       CAT_COLORS[c] = COLORS_MICRO[i]
 for i, c in enumerate(GROUPS["Biomass Burning"]): CAT_COLORS[c] = COLORS_BB[i]
 for i, c in enumerate(GROUPS["Fossil Fuel"]):     CAT_COLORS[c] = COLORS_FF[i]
 
 # ══════════════════════════════════════════════════════════════════════════
-# TASK 1 — Emission stacked-area + line plot per group (one figure per group)
+# TASK 1 — Emission plots (stacked area + lines, one figure per group)
 # ══════════════════════════════════════════════════════════════════════════
 print("\nTask 1: Emission plots...")
 
@@ -154,8 +181,6 @@ for gname, cats in GROUPS.items():
 
     fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(10, 7), sharex=True,
                                           gridspec_kw={"height_ratios": [2, 1.2]})
-
-    # Top: stacked area
     cols = [CAT_COLORS[c] for c in cats]
     labels = [PRETTY[c] for c in cats]
     ax_top.stackplot(merged.index, *[merged[c].values for c in cats],
@@ -164,7 +189,6 @@ for gname, cats in GROUPS.items():
     ax_top.set_title(f"{gname} Sources — Monthly CH$_4$ Emissions", fontsize=12)
     ax_top.legend(loc="upper left", fontsize=7, ncol=min(3, len(cats)), framealpha=0.9)
 
-    # Bottom: individual lines
     for c in cats:
         ax_bot.plot(merged.index, merged[c].values, label=PRETTY[c],
                     color=CAT_COLORS[c], linewidth=1)
@@ -177,7 +201,6 @@ for gname, cats in GROUPS.items():
     plt.close(fig)
     print(f"  ✓ emission_{gname.replace(' ','_')}.png")
 
-# Combined overview
 fig, ax = plt.subplots(figsize=(10, 5))
 for gname, cats in GROUPS.items():
     merged = pd.concat([emissions[c] for c in cats], axis=1, join="inner")
@@ -193,9 +216,9 @@ plt.close(fig)
 print("  ✓ emission_all_groups.png")
 
 # ══════════════════════════════════════════════════════════════════════════
-# TASK 2 — Monte-Carlo isotope (IQR: 25th–75th)
+# TASK 2 — Monte-Carlo: truncated-normal isotope, IQR (25th–75th)
 # ══════════════════════════════════════════════════════════════════════════
-print("\nTask 2: Monte-Carlo isotope calculation (IQR)...")
+print("\nTask 2: Truncated-normal Monte-Carlo isotope (IQR)...")
 
 def compute_group_isotope_mc(cat_list, iso_key):
     frames = {c: emissions[c] for c in cat_list}
@@ -208,8 +231,8 @@ def compute_group_isotope_mc(cat_list, iso_key):
 
     for cat in cat_list:
         em = merged_em[cat].values
-        lo, hi = ISO[cat][iso_key]
-        iso_samples = np.random.uniform(lo, hi, (n, N_MC))
+        mu, sigma = ISO[cat][iso_key]
+        iso_samples = sample_truncnorm(mu, sigma, (n, N_MC))
         weighted_sum += em[:, None] * iso_samples
         total_em += em[:, None]
 
@@ -242,22 +265,19 @@ for gname, df in results.items():
     print(f"  ✓ {csv_path.name}")
 
     color_c = GROUP_COLORS[gname]
-    # Slightly different shade for dD
     color_d = {"Microbial": "#d95f02", "Biomass Burning": "#ff7f00", "Fossil Fuel": "#984ea3"}[gname]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
     fig.suptitle(f"{gname} — Emission-Weighted Isotope Signatures\n"
-                 f"(Monte Carlo, n = {N_MC:,}; shading = IQR 25th–75th)",
+                 f"(Truncated-Normal MC, n = {N_MC:,}; shading = IQR 25th–75th)",
                  fontsize=11)
 
-    # δ13C
     ax1.plot(df.index, df["d13C_median"], color=color_c, linewidth=1, label="Median")
     ax1.fill_between(df.index, df["d13C_q25"], df["d13C_q75"],
                      alpha=0.3, color=color_c, label="IQR (25th–75th)")
     ax1.set_ylabel("$\\delta^{13}$C (‰ VPDB)")
     ax1.legend(loc="best", fontsize=8, framealpha=0.9)
 
-    # δD
     ax2.plot(df.index, df["dD_median"], color=color_d, linewidth=1, label="Median")
     ax2.fill_between(df.index, df["dD_q25"], df["dD_q75"],
                      alpha=0.3, color=color_d, label="IQR (25th–75th)")
@@ -278,10 +298,10 @@ for gname, cats in GROUPS.items():
     print(f"  ✓ emission_{gname.replace(' ','_')}.csv")
 
 # ══════════════════════════════════════════════════════════════════════════
-# Summary statistics & suggestions
+# Summary
 # ══════════════════════════════════════════════════════════════════════════
 print("\n" + "="*72)
-print("SUMMARY STATISTICS")
+print("SUMMARY — UPDATED ISOTOPE VALUES (Truncated-Normal)")
 print("="*72)
 
 for gname, cats in GROUPS.items():
@@ -291,62 +311,28 @@ for gname, cats in GROUPS.items():
     iso_df = results[gname]
 
     print(f"\n── {gname} ──")
-    print(f"  Emission (annual Tg):  mean={annual.mean():.1f}  "
-          f"min={annual.min():.1f}  max={annual.max():.1f}")
+    print(f"  Emission (annual Tg):  mean={annual.mean():.1f}")
     for cat in cats:
-        s = merged[cat]
-        ann = s.resample("YE").sum()
-        frac = (ann / annual * 100)
-        print(f"    {PRETTY[cat]:18s}  mean={ann.mean():7.1f} Tg/yr  ({frac.mean():5.1f}%)")
-
-    print(f"  δ13C median (‰):  overall={iso_df['d13C_median'].mean():.1f}  "
-          f"IQR width={( iso_df['d13C_q75'] - iso_df['d13C_q25'] ).mean():.1f}")
-    print(f"  δD   median (‰):  overall={iso_df['dD_median'].mean():.1f}  "
-          f"IQR width={( iso_df['dD_q75'] - iso_df['dD_q25'] ).mean():.1f}")
+        mu_c, sig_c = ISO[cat]["d13C"]
+        mu_d, sig_d = ISO[cat]["dD"]
+        print(f"    {PRETTY[cat]:18s}  δ¹³C = {mu_c:.1f} ± {sig_c:.1f}‰  "
+              f"δD = {mu_d:.0f} ± {sig_d:.0f}‰")
+    iqr_c = (iso_df["d13C_q75"] - iso_df["d13C_q25"]).mean()
+    iqr_d = (iso_df["dD_q75"] - iso_df["dD_q25"]).mean()
+    print(f"  Group δ¹³C:  median={iso_df['d13C_median'].mean():.1f}‰  IQR width={iqr_c:.1f}‰")
+    print(f"  Group δD:    median={iso_df['dD_median'].mean():.1f}‰  IQR width={iqr_d:.1f}‰")
 
 print("\n" + "="*72)
-print("SUGGESTIONS FOR INTERPRETATION")
+print("KEY IMPROVEMENTS OVER v2 (uniform)")
 print("="*72)
 print("""
-1. ISOTOPE SEPARATION BETWEEN GROUPS
-   - Biomass Burning has the most enriched δ13C (≈ −20‰), clearly distinct from
-     Microbial (≈ −53‰) and Fossil Fuel (≈ −47‰). δ13C alone can separate
-     biomass burning from the other two, but NOT microbial from fossil fuel.
-   - δD adds discrimination: Microbial sources are the most D-depleted (≈ −315‰)
-     while Fossil Fuel (≈ −180‰) and Biomass Burning (≈ −220‰) are heavier.
-   → Use dual-isotope (δ13C vs δD) space to separate all three groups.
-
-2. LARGE UNCERTAINTY IN MICROBIAL SIGNATURES
-   - Wetland δ13C spans −73.6 to −18.2‰ — this alone dominates the IQR.
-   - Wetland is also the largest microbial emitter (~160 Tg/yr).
-   → Narrowing wetland isotope constraints would most improve group-level estimates.
-   → Consider region-specific or biome-specific wetland isotope values.
-
-3. FOSSIL FUEL SUBCATEGORIES OVERLAP
-   - Oil, gas, coal, and geological all share very similar δ13C and δD ranges.
-   - Their isotopic separation is poor; source attribution within fossil fuel
-     requires additional tracers (e.g., ethane/methane ratio, 14C, clumped isotopes).
-
-4. TEMPORAL TRENDS
-   - Microbial emissions show strong seasonality (rice + wetland peak in boreal summer).
-   - Fossil Fuel emissions show a steady upward trend (gas growth).
-   - Biomass Burning is relatively stable.
-   → Seasonal isotope variations are driven mainly by the microbial group;
-     this can be leveraged for top-down inversion studies.
-
-5. MONTE CARLO APPROACH
-   - Uniform distributions are conservative (maximum entropy for bounded ranges).
-   - If literature provides means ± σ, switching to truncated-normal would
-     tighten the IQR and better reflect the actual knowledge state.
-   - Consider correlating isotope values with emission magnitude if data permits.
-
-6. PRACTICAL RECOMMENDATIONS
-   - For atmospheric modelling: report emission-weighted isotope signatures
-     with IQR as the uncertainty band (this analysis).
-   - For source attribution: combine δ13C and δD in a Keeling-plot or
-     Bayesian mixing model framework.
-   - Priority measurement targets: wetland-specific δ13C, livestock δD
-     (current range −360 to −150‰ is very broad).
+1. WETLAND uncertainty collapsed: old uniform ±27.7‰ → truncated-normal σ=3.3‰ [2]
+2. LIVESTOCK δ²H tightened: old range 210‰ → σ=28‰ (flux-weighted) [2,6]
+3. LANDFILL δ²H very tight: σ=6‰ — one of the best-constrained sources [2]
+4. GEOLOGICAL δ¹³C corrected lighter: −49‰ (was ~−38‰ in old literature) [3]
+5. MANURE separated from livestock: δ¹³C ~14‰ heavier than enteric [Arndt 2022]
+6. Truncated-normal distributions concentrate probability around observed means,
+   yielding narrower IQR than uniform — better reflecting actual measurement spread.
 """)
 
 print("✅ All done! Results in:", OUT)
