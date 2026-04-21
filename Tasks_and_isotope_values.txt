@@ -1,0 +1,29 @@
+The source of methane will be divided into 3 main groups (Microbial,Fossil Fuel,Biomass Burning)based on its difference on isotope values.
+Isotope includes carbon(13C/12C) and hydrogen(D/H). scale for emission:Tg for isotope: per mil
+
+
+Each big group can be divided into smaller categories.
+
+Microbial_category;13C/12C;D/H 
+landfill; -60~-40;-350~-250
+livestock; -67.8~-54.6;-360~-150
+manure;-65~-45;-350~-300
+rice;-70~-55;-390~-320
+wastewater;-60~-45;-360~-300
+wetland;-73.6~-18.2;-400~-300
+
+Biomass Burning category;13C/12C;D/H
+wildfire;-26.7~-12.6;-260~-170
+Biofuel Burning;-26.7~-12.6;-270~-190
+
+FossilFuel category;13C/12C;D/H
+oil;-65.0~-29.1;-250~-120
+Gas;-65.0~-29.1;-250~-100
+Coal;-64.1~-30.8;-240~-110
+Geological;-68.0~-24.3;-300~-100
+
+Task
+1. read folders and plot emission for each big category
+2. calculate monthly time series of isotope(both carbon and hydrogen) values of each main group weighted by emission. use monte carlo to deal with uncertaintoes.
+3. plot and save each to .csv
+
